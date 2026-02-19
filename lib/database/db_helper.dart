@@ -27,7 +27,8 @@ class DBHelper {
             name TEXT,
             url TEXT,
             height INTEGER,
-            weight INTEGER
+            weight INTEGER,
+            favorito INTEGER DEFAULT 0
           )
         ''');
 
