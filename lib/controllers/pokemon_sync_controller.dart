@@ -31,11 +31,18 @@ class PokemonSyncController {
     try {
       final listaAPI = await service.fetchPokemonList(limit: limit);
 
+      double progressoTotal = 0;
+      void atualizar(double parte) {
+        progressoTotal = parte;
+        onProgress?.call(progressoTotal.clamp(0, 1));
+      }
+
       /// ==========================================
       /// FASE 1 — BAIXA TODOS OS DETALHES
       /// ==========================================
 
       final List<Map<String, dynamic>> detalhes = [];
+      int countInsert = 0;
 
       for (int i = 0; i < listaAPI.length; i += concorrencia) {
         final bloco = listaAPI.skip(i).take(concorrencia);
@@ -46,8 +53,11 @@ class PokemonSyncController {
 
         detalhes.addAll(results);
 
-        onProgress?.call(detalhes.length / listaAPI.length);
+        atualizar((detalhes.length / listaAPI.length) * 0.4);
       }
+
+      countInsert++;
+      atualizar(0.4 + (countInsert / detalhes.length) * 0.4);
 
       /// ==========================================
       /// FASE 2 — INSERE TODOS OS POKEMON
