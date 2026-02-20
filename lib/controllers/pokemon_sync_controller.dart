@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../models/historico_atualizacao.dart';
 import '../repositories/pokemon_repository.dart';
 import '../repositories/tipo_repository.dart';
@@ -20,43 +22,62 @@ class PokemonSyncController {
   final EvolucaoRepository evolucaoRepo = EvolucaoRepository();
   final HistoricoRepository historicoRepo = HistoricoRepository();
 
+  final int concorrencia = 8;
+
   Future<String> sincronizar({
-    int limit = 200,
+    int limit = 151,
     Function(double progresso)? onProgress,
   }) async {
     try {
       final listaAPI = await service.fetchPokemonList(limit: limit);
 
-      int inseridos = 0;
+      /// ==========================================
+      /// FASE 1 — BAIXA TODOS OS DETALHES
+      /// ==========================================
 
-      /// ⭐ GUARDA TODAS AS CHAINS PARA PROCESSAR DEPOIS
-      final Set<String> todasChains = {};
+      final List<Map<String, dynamic>> detalhes = [];
 
-      /// ======================================================
-      /// PRIMEIRO: BAIXA TODOS POKEMONS
-      /// ======================================================
+      for (int i = 0; i < listaAPI.length; i += concorrencia) {
+        final bloco = listaAPI.skip(i).take(concorrencia);
 
-      for (final p in listaAPI) {
-        final detail = await service.fetchPokemonDetail(p['url']);
+        final results = await Future.wait(
+          bloco.map((p) => service.fetchPokemonDetail(p['url'])),
+        );
 
+        detalhes.addAll(results);
+
+        onProgress?.call(detalhes.length / listaAPI.length);
+      }
+
+      /// ==========================================
+      /// FASE 2 — INSERE TODOS OS POKEMON
+      /// ==========================================
+
+      final Map<String, Pokemon> cachePokemon = {};
+      final Set<String> chains = {};
+
+      for (final detail in detalhes) {
         final pokemon = Pokemon(
           id: detail['id'],
           name: detail['name'],
-          url: p['url'],
+          url: '',
           height: detail['height'],
           weight: detail['weight'],
         );
 
         await pokemonRepo.insertPokemon(pokemon);
+
+        cachePokemon[pokemon.name] = pokemon;
+
         final pokemonId = pokemon.id;
 
-        /// ================= TIPOS
+        /// TIPOS
         for (final t in detail['types']) {
           final tipoId = await tipoRepo.insertTipo(t['type']['name']);
           await tipoRepo.insertPokemonTipo(pokemonId, tipoId, t['slot']);
         }
 
-        /// ================= HABILIDADES
+        /// HABILIDADES
         for (final h in detail['abilities']) {
           final habId = await habilidadeRepo.insertHabilidade(
             h['ability']['name'],
@@ -70,7 +91,7 @@ class PokemonSyncController {
           );
         }
 
-        /// ================= STATS
+        /// STATS
         for (final s in detail['stats']) {
           final statId = await statRepo.insertStat(s['stat']['name']);
 
@@ -82,9 +103,8 @@ class PokemonSyncController {
           );
         }
 
-        /// ================= SPRITE
+        /// SPRITE
         final sprites = detail['sprites'];
-
         if (sprites['front_default'] != null) {
           await spriteRepo.insertSprite(
             pokemonId,
@@ -93,70 +113,44 @@ class PokemonSyncController {
           );
         }
 
-        /// ================= GUARDA CHAIN PRA DEPOIS
-        final speciesUrl = detail['species']['url'];
-        final species = await service.fetchSpecies(speciesUrl);
-
-        final chainUrl = species['evolution_chain']['url'];
-
-        todasChains.add(chainUrl);
-
-        inseridos++;
-
-        onProgress?.call(inseridos / listaAPI.length);
+        /// CHAIN
+        final species = await service.fetchSpecies(detail['species']['url']);
+        chains.add(species['evolution_chain']['url']);
       }
 
-      /// ======================================================
-      /// SEGUNDO: AGORA SIM SALVA EVOLUÇÕES
-      /// ======================================================
+      /// ==========================================
+      /// FASE 3 — AGORA SALVA EVOLUÇÕES
+      /// ==========================================
 
-      for (final chainUrl in todasChains) {
-        final chainData = await service.fetchEvolutionChain(chainUrl);
-
-        await _salvarChain(chainData['chain']);
+      for (final url in chains) {
+        final chainData = await service.fetchEvolutionChain(url);
+        await _salvarChain(chainData['chain'], cachePokemon);
       }
-
-      /// ======================================================
 
       await historicoRepo.insertHistorico(
         HistoricoAtualizacao(
-          countPokemons: inseridos,
+          countPokemons: cachePokemon.length,
           dataUltimaAtualizacao: DateTime.now().toIso8601String(),
           sucesso: true,
         ),
       );
 
-      return "Sincronização OK — $inseridos pokémons";
+      return "SYNC OK — ${cachePokemon.length} pokémons";
     } catch (e) {
       return "Erro sincronizando: $e";
     }
   }
 
-  /// ======================================================
-  /// SALVA EVOLUÇÃO RECURSIVA
-  /// ======================================================
-
-  Future<void> _salvarChain(Map chain) async {
-    final atualNome = chain['species']['name'];
-
-    final atual = await pokemonRepo.getPokemonByName(atualNome);
-
-    if (atual == null) {
-      return;
-    }
-
-    final atualId = atual.id;
+  Future<void> _salvarChain(
+    Map chain,
+    Map<String, Pokemon> cachePokemon,
+  ) async {
+    final atual = cachePokemon[chain['species']['name']];
+    if (atual == null) return;
 
     for (final evo in chain['evolves_to']) {
-      final proxNome = evo['species']['name'];
-
-      final prox = await pokemonRepo.getPokemonByName(proxNome);
-
-      if (prox == null) {
-        continue;
-      }
-
-      final proxId = prox.id;
+      final prox = cachePokemon[evo['species']['name']];
+      if (prox == null) continue;
 
       int? nivel;
 
@@ -165,10 +159,9 @@ class PokemonSyncController {
         nivel = evo['evolution_details'][0]['min_level'];
       }
 
-      await evolucaoRepo.insertEvolucao(atualId, proxId, 'level', nivel);
+      await evolucaoRepo.insertEvolucao(atual.id, prox.id, 'level', nivel);
 
-      /// recursivo
-      await _salvarChain(evo);
+      await _salvarChain(evo, cachePokemon);
     }
   }
 }
